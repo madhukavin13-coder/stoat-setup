@@ -7,9 +7,11 @@ function Step($Text) {
 function Ask($Prompt, $Default = "") {
     if ($Default) {
         $Value = Read-Host "$Prompt [$Default]"
+
         if ([string]::IsNullOrWhiteSpace($Value)) {
             return $Default
         }
+
         return $Value.Trim()
     }
 
@@ -26,9 +28,11 @@ function Ask-YesNo($Prompt, $Default = $true) {
             return $Default
         }
 
-        switch -Regex ($Value.Trim().ToLower()) {
-            "^(y|yes)$" { return $true }
-            "^(n|no)$"  { return $false }
+        switch ($Value.Trim().ToLower()) {
+            "y"    { return $true }
+            "yes"  { return $true }
+            "n"    { return $false }
+            "no"   { return $false }
         }
     }
 }
@@ -64,10 +68,10 @@ function Restart-AsAdmin {
 }
 
 function Refresh-Path {
-    $env:Path =
-        [Environment]::GetEnvironmentVariable("Path", "Machine") +
-        ";" +
-        [Environment]::GetEnvironmentVariable("Path", "User")
+    $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+
+    $env:Path = "$MachinePath;$UserPath"
 }
 
 function Require-Winget {
@@ -97,7 +101,7 @@ function Install-Git {
     Refresh-Path
 
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        throw "Git was installed but is not available yet. Restart setup and try again."
+        throw "Git was installed but is not available yet."
     }
 }
 
@@ -144,6 +148,46 @@ function Install-Docker {
     throw "Docker Desktop did not become ready."
 }
 
+function Install-FirewallRules($Cloudflared) {
+    Step "Configuring Windows Firewall..."
+
+    $Rules = @(
+        @{
+            Name = "Stoat Cloudflared TCP 7844"
+            Protocol = "TCP"
+        },
+        @{
+            Name = "Stoat Cloudflared UDP 7844"
+            Protocol = "UDP"
+        }
+    )
+
+    foreach ($Rule in $Rules) {
+        $Existing = Get-NetFirewallRule `
+            -DisplayName $Rule.Name `
+            -ErrorAction SilentlyContinue
+
+        if ($Existing) {
+            Set-NetFirewallRule `
+                -DisplayName $Rule.Name `
+                -Enabled True `
+                -Direction Outbound `
+                -Action Allow
+        }
+        else {
+            New-NetFirewallRule `
+                -DisplayName $Rule.Name `
+                -Direction Outbound `
+                -Action Allow `
+                -Protocol $Rule.Protocol `
+                -RemotePort 7844 `
+                -Program $Cloudflared | Out-Null
+        }
+    }
+
+    Step "Firewall rules ready."
+}
+
 function Download-Cloudflared {
     $Existing = Get-Command cloudflared -ErrorAction SilentlyContinue
 
@@ -175,7 +219,6 @@ function Download-Cloudflared {
 
 function Fix-LineEndings($File) {
     $Bytes = [System.IO.File]::ReadAllBytes($File)
-
     $Output = [System.Collections.Generic.List[byte]]::new()
 
     for ($i = 0; $i -lt $Bytes.Length; $i++) {
@@ -201,6 +244,7 @@ function Clone-Stoat($Directory) {
 
     if (Test-Path (Join-Path $Directory ".git")) {
         Step "Existing Stoat repository found."
+
         Set-Location $Directory
 
         Step "Updating repository..."
@@ -242,9 +286,6 @@ function Generate-Config($Directory, $Domain, $Video) {
 
     Step "Generating Stoat configuration..."
 
-    # Stoat's official generator is a Bash script.
-    # Run it inside a temporary Linux container so Windows
-    # does not need a native Bash/OpenSSL environment.
     $Command = @"
 apk add --no-cache bash openssl coreutils >/dev/null 2>&1 &&
 chmod +x ./generate_config.sh &&
@@ -289,69 +330,36 @@ function Start-Stoat($Directory) {
     docker compose ps
 }
 
-function Setup-Cloudflare($Cloudflared, $Directory, $Domain) {
-    Write-Host ""
-    Write-Host "Cloudflare Tunnel" -ForegroundColor Cyan
-    Write-Host ""
+function Get-TunnelId($Cloudflared, $TunnelName) {
+    $Json = & $Cloudflared tunnel list --output json 2>$null
 
-    Step "Cloudflare login is required once."
-    Step "A browser window will open."
-
-    Write-Host ""
-    Read-Host "Press Enter to continue"
-
-    & $Cloudflared tunnel login
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Cloudflare login failed."
+    if (-not $Json) {
+        return $null
     }
 
-    $TunnelName = "stoat-$($Domain -replace '[^a-zA-Z0-9-]', '-')"
-
-    Step "Creating tunnel: $TunnelName"
-
-    $TunnelList = & $Cloudflared tunnel list --output json 2>$null
-
-    $ExistingTunnel = $null
-
-    if ($TunnelList) {
-        try {
-            $Parsed = $TunnelList | ConvertFrom-Json
-            $ExistingTunnel = $Parsed |
-                Where-Object { $_.name -eq $TunnelName } |
-                Select-Object -First 1
-        }
-        catch {
-            $ExistingTunnel = $null
-        }
-    }
-
-    if ($ExistingTunnel) {
-        $TunnelId = $ExistingTunnel.id
-        Step "Existing tunnel found."
-    }
-    else {
-        & $Cloudflared tunnel create $TunnelName
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "Cloudflare tunnel creation failed."
-        }
-
-        $TunnelList = & $Cloudflared tunnel list --output json
-
-        $Parsed = $TunnelList | ConvertFrom-Json
+    try {
+        $Parsed = $Json | ConvertFrom-Json
 
         $Tunnel = $Parsed |
             Where-Object { $_.name -eq $TunnelName } |
             Select-Object -First 1
 
-        if (-not $Tunnel) {
-            throw "Cloudflare tunnel was created but could not be located."
+        if ($Tunnel) {
+            return $Tunnel.id
         }
-
-        $TunnelId = $Tunnel.id
+    }
+    catch {
+        return $null
     }
 
+    return $null
+}
+
+function Create-CloudflareConfig(
+    $Directory,
+    $Domain,
+    $TunnelId
+) {
     $CloudflareDirectory = Join-Path $Directory "cloudflare"
 
     New-Item `
@@ -377,31 +385,98 @@ credentials-file: $Credentials
 
 ingress:
   - hostname: $Domain
-    service: http://localhost:80
+    service: https://localhost:443
+    originRequest:
+      originServerName: $Domain
+      noTLSVerify: true
 
   - service: http_status:404
 "@ | Set-Content `
         -Path $Config `
         -Encoding UTF8
 
+    return $Config
+}
+
+function Setup-Cloudflare(
+    $Cloudflared,
+    $Directory,
+    $Domain
+) {
+    Write-Host ""
+    Write-Host "Cloudflare Tunnel" -ForegroundColor Cyan
+    Write-Host ""
+
+    Step "Cloudflare login is required once."
+    Step "A browser window will open."
+
+    Write-Host ""
+    Read-Host "Press Enter to continue"
+
+    & $Cloudflared tunnel login
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cloudflare login failed."
+    }
+
+    $TunnelName = "stoat-$($Domain -replace '[^a-zA-Z0-9-]', '-')"
+
+    $TunnelId = Get-TunnelId `
+        $Cloudflared `
+        $TunnelName
+
+    if ($TunnelId) {
+        Step "Existing Cloudflare tunnel found: $TunnelName"
+    }
+    else {
+        Step "Creating Cloudflare tunnel: $TunnelName"
+
+        & $Cloudflared tunnel create $TunnelName
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cloudflare tunnel creation failed."
+        }
+
+        $TunnelId = Get-TunnelId `
+            $Cloudflared `
+            $TunnelName
+
+        if (-not $TunnelId) {
+            throw "Tunnel was created but its ID could not be located."
+        }
+    }
+
+    $Config = Create-CloudflareConfig `
+        $Directory `
+        $Domain `
+        $TunnelId
+
     Step "Creating DNS route..."
 
-    & $Cloudflared tunnel route dns $TunnelName $Domain
+    & $Cloudflared tunnel route dns `
+        $TunnelName `
+        $Domain
 
     if ($LASTEXITCODE -ne 0) {
         throw "Cloudflare DNS route creation failed."
     }
 
+    Step "Validating Cloudflare configuration..."
+
+    & $Cloudflared tunnel ingress validate `
+        --config $Config
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cloudflare tunnel configuration is invalid."
+    }
+
     Step "Cloudflare tunnel configured."
 
-    Write-Host ""
-    Write-Host "Starting tunnel..." -ForegroundColor Cyan
-    Write-Host ""
-
-    & $Cloudflared `
-        tunnel `
-        --config $Config `
-        run $TunnelName
+    return @{
+        Name = $TunnelName
+        Id = $TunnelId
+        Config = $Config
+    }
 }
 
 try {
@@ -434,10 +509,6 @@ try {
         "Enable voice, camera and screen sharing?" `
         $true
 
-    $UseCloudflare = Ask-YesNo `
-        "Set up Cloudflare Tunnel?" `
-        $true
-
     Write-Host ""
     Write-Host "Preparing system..." -ForegroundColor Cyan
     Write-Host ""
@@ -445,13 +516,19 @@ try {
     Install-Git
     Install-Docker
 
+    $Cloudflared = Download-Cloudflared
+
+    Install-FirewallRules $Cloudflared
+
     Write-Host ""
     Write-Host "Stoat" -ForegroundColor Cyan
     Write-Host ""
 
     Clone-Stoat $InstallDirectory
 
-    $Secrets = Join-Path $InstallDirectory "secrets.env"
+    $Secrets = Join-Path `
+        $InstallDirectory `
+        "secrets.env"
 
     if (Test-Path $Secrets) {
         Step "Existing Stoat secrets detected."
@@ -466,14 +543,10 @@ try {
 
     Start-Stoat $InstallDirectory
 
-    if ($UseCloudflare) {
-        $Cloudflared = Download-Cloudflared
-
-        Setup-Cloudflare `
-            $Cloudflared `
-            $InstallDirectory `
-            $Domain
-    }
+    $Cloudflare = Setup-Cloudflare `
+        $Cloudflared `
+        $InstallDirectory `
+        $Domain
 
     Write-Host ""
     Write-Host "Stoat is running." -ForegroundColor Green
@@ -481,11 +554,10 @@ try {
     Write-Host "  URL: https://$Domain"
     Write-Host "  Location: $InstallDirectory"
     Write-Host ""
-    Write-Host "Useful commands:" -ForegroundColor Cyan
-    Write-Host "  cd $InstallDirectory"
-    Write-Host "  docker compose ps"
-    Write-Host "  docker compose logs -f"
-    Write-Host "  docker compose restart"
+    Write-Host "Startup script:" -ForegroundColor Cyan
+    Write-Host "  $InstallDirectory\startup.ps1"
+    Write-Host ""
+    Write-Host "Keep this PowerShell window open while the tunnel is running."
     Write-Host ""
 }
 catch {
@@ -494,5 +566,6 @@ catch {
     Write-Host ""
     Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
+    Read-Host "Press Enter to close"
     exit 1
 }
