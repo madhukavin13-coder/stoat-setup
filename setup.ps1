@@ -1,4 +1,3 @@
-```powershell
 $ErrorActionPreference = "Stop"
 
 function Step($Text) {
@@ -660,4 +659,3 @@ catch {
     Write-Host ""
     exit 1
 }
-```
