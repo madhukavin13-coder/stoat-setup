@@ -37,6 +37,21 @@ function Ask-YesNo($Prompt, $Default = $true) {
     }
 }
 
+function Show-SetupWarning {
+    Add-Type -AssemblyName System.Windows.Forms
+
+    $Result = [System.Windows.Forms.MessageBox]::Show(
+        "yoooo wachine mahcien ur gayy`n`nStoat setup is about to begin.",
+        "Stoat Setup",
+        [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
+
+    if ($Result -ne [System.Windows.Forms.DialogResult]::OK) {
+        exit 0
+    }
+}
+
 function Is-Admin {
     $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
@@ -273,15 +288,44 @@ function Clone-Stoat($Directory) {
     Set-Location $Directory
 }
 
+function Get-GitBash {
+    $Paths = @(
+        "${env:ProgramFiles}\Git\bin\bash.exe",
+        "${env:ProgramFiles(x86)}\Git\bin\bash.exe",
+        "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe"
+    )
+
+    foreach ($Path in $Paths) {
+        if (Test-Path $Path) {
+            return $Path
+        }
+    }
+
+    $Git = Get-Command git -ErrorAction SilentlyContinue
+
+    if ($Git) {
+        $GitDirectory = Split-Path $Git.Source -Parent
+        $Bash = Join-Path $GitDirectory "bash.exe"
+
+        if (Test-Path $Bash) {
+            return $Bash
+        }
+
+        $Bash = Join-Path `
+            (Split-Path $GitDirectory -Parent) `
+            "bin\bash.exe"
+
+        if (Test-Path $Bash) {
+            return $Bash
+        }
+    }
+
+    throw "Git Bash was not found."
+}
+
 function Generate-Config($Directory, $Domain, $Video) {
     $Generator = Join-Path $Directory "generate_config.sh"
-    $Secrets = Join-Path $Directory "secrets.env"
-    $SecretsExample = Join-Path $Directory "secrets.env.example"
-    $WebEnv = Join-Path $Directory ".env.web"
-    $Env = Join-Path $Directory ".env"
     $Revolt = Join-Path $Directory "Revolt.toml"
-    $Livekit = Join-Path $Directory "livekit.yml"
-    $StoatJson = Join-Path $Directory "stoat.json"
 
     if (-not (Test-Path $Generator)) {
         throw "generate_config.sh was not found."
@@ -289,55 +333,27 @@ function Generate-Config($Directory, $Domain, $Video) {
 
     Fix-LineEndings $Generator
 
+    $GitBash = Get-GitBash
+
     $VideoAnswer = if ($Video) { "y" } else { "n" }
 
-    $ExistingConfig = (
-        (Test-Path $Revolt) -or
-        (Test-Path $WebEnv) -or
-        (Test-Path $Env) -or
-        (Test-Path $Livekit) -or
-        (Test-Path $StoatJson)
-    )
+    if (Test-Path $Revolt) {
+        Step "Existing Stoat configuration detected."
+        Step "Regenerating configuration with existing secrets."
 
-    if (-not (Test-Path $Secrets)) {
-        if (-not (Test-Path $SecretsExample)) {
-            throw "secrets.env.example was not found."
-        }
-
-        Step "Creating Stoat secrets file..."
-
-        Copy-Item `
-            -Path $SecretsExample `
-            -Destination $Secrets `
-            -Force
-    }
-
-    if ($ExistingConfig) {
-        Step "Incomplete Stoat configuration detected."
-        Step "Regenerating existing configuration."
-        $GeneratorCommand = "./generate_config.sh --overwrite `"$Domain`""
+        $Arguments = "--overwrite `"$Domain`""
     }
     else {
         Step "Generating Stoat configuration."
-        $GeneratorCommand = "./generate_config.sh `"$Domain`""
-    }
 
-    $Command = @"
-apk add --no-cache bash openssl coreutils >/dev/null 2>&1 &&
-chmod +x ./generate_config.sh &&
-printf "n\n$VideoAnswer\n" |
-$GeneratorCommand
-"@
+        $Arguments = "`"$Domain`""
+    }
 
     Step "Running Stoat configuration generator..."
 
-    docker run `
-        --rm `
-        -i `
-        -v "${Directory}:/stoat" `
-        -w /stoat `
-        alpine:latest `
-        sh -c $Command
+    $Input = "n`n$VideoAnswer`n"
+
+    $Input | & $GitBash -lc "cd '$Directory' && ./generate_config.sh $Arguments"
 
     if ($LASTEXITCODE -ne 0) {
         throw "Stoat configuration generation failed."
@@ -569,6 +585,8 @@ function Setup-Cloudflare(
 
 try {
     Clear-Host
+
+    Show-SetupWarning
 
     Write-Host ""
     Write-Host "Stoat Setup" -ForegroundColor Cyan
