@@ -275,6 +275,13 @@ function Clone-Stoat($Directory) {
 
 function Generate-Config($Directory, $Domain, $Video) {
     $Generator = Join-Path $Directory "generate_config.sh"
+    $Secrets = Join-Path $Directory "secrets.env"
+    $SecretsExample = Join-Path $Directory "secrets.env.example"
+    $WebEnv = Join-Path $Directory ".env.web"
+    $Env = Join-Path $Directory ".env"
+    $Revolt = Join-Path $Directory "Revolt.toml"
+    $Livekit = Join-Path $Directory "livekit.yml"
+    $StoatJson = Join-Path $Directory "stoat.json"
 
     if (-not (Test-Path $Generator)) {
         throw "generate_config.sh was not found."
@@ -284,14 +291,45 @@ function Generate-Config($Directory, $Domain, $Video) {
 
     $VideoAnswer = if ($Video) { "y" } else { "n" }
 
-    Step "Generating Stoat configuration..."
+    $ExistingConfig = (
+        (Test-Path $Revolt) -or
+        (Test-Path $WebEnv) -or
+        (Test-Path $Env) -or
+        (Test-Path $Livekit) -or
+        (Test-Path $StoatJson)
+    )
+
+    if (-not (Test-Path $Secrets)) {
+        if (-not (Test-Path $SecretsExample)) {
+            throw "secrets.env.example was not found."
+        }
+
+        Step "Creating Stoat secrets file..."
+
+        Copy-Item `
+            -Path $SecretsExample `
+            -Destination $Secrets `
+            -Force
+    }
+
+    if ($ExistingConfig) {
+        Step "Incomplete Stoat configuration detected."
+        Step "Regenerating existing configuration."
+        $GeneratorCommand = "./generate_config.sh --overwrite `"$Domain`""
+    }
+    else {
+        Step "Generating Stoat configuration."
+        $GeneratorCommand = "./generate_config.sh `"$Domain`""
+    }
 
     $Command = @"
 apk add --no-cache bash openssl coreutils >/dev/null 2>&1 &&
 chmod +x ./generate_config.sh &&
 printf "n\n$VideoAnswer\n" |
-./generate_config.sh "$Domain"
+$GeneratorCommand
 "@
+
+    Step "Running Stoat configuration generator..."
 
     docker run `
         --rm `
@@ -304,6 +342,56 @@ printf "n\n$VideoAnswer\n" |
     if ($LASTEXITCODE -ne 0) {
         throw "Stoat configuration generation failed."
     }
+
+    $RequiredFiles = @(
+        "secrets.env",
+        ".env",
+        ".env.web",
+        "Revolt.toml",
+        "livekit.yml",
+        "stoat.json"
+    )
+
+    foreach ($File in $RequiredFiles) {
+        $Path = Join-Path $Directory $File
+
+        if (-not (Test-Path $Path)) {
+            throw "Stoat configuration is incomplete. Missing: $File"
+        }
+    }
+
+    Step "Stoat configuration generated successfully."
+}
+
+function Validate-StoatConfig($Directory) {
+    Step "Validating Stoat configuration..."
+
+    $RequiredFiles = @(
+        "secrets.env",
+        ".env",
+        ".env.web",
+        "Revolt.toml",
+        "livekit.yml",
+        "stoat.json"
+    )
+
+    foreach ($File in $RequiredFiles) {
+        $Path = Join-Path $Directory $File
+
+        if (-not (Test-Path $Path)) {
+            throw "Required Stoat configuration file is missing: $File"
+        }
+    }
+
+    Set-Location $Directory
+
+    docker compose config *> $null
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker Compose configuration validation failed."
+    }
+
+    Step "Stoat configuration is valid."
 }
 
 function Start-Stoat($Directory) {
@@ -484,6 +572,7 @@ try {
 
     Write-Host ""
     Write-Host "Stoat Setup" -ForegroundColor Cyan
+    Write-Host "yoooo wachine mahcien ur gay" -ForegroundColor DarkGray
     Write-Host ""
 
     Restart-AsAdmin
@@ -530,16 +619,73 @@ try {
         $InstallDirectory `
         "secrets.env"
 
-    if (Test-Path $Secrets) {
-        Step "Existing Stoat secrets detected."
-        Step "Keeping the existing configuration."
+    $WebEnv = Join-Path `
+        $InstallDirectory `
+        ".env.web"
+
+    $Env = Join-Path `
+        $InstallDirectory `
+        ".env"
+
+    $Revolt = Join-Path `
+        $InstallDirectory `
+        "Revolt.toml"
+
+    $Livekit = Join-Path `
+        $InstallDirectory `
+        "livekit.yml"
+
+    $StoatJson = Join-Path `
+        $InstallDirectory `
+        "stoat.json"
+
+    $ConfigComplete = (
+        (Test-Path $Secrets) -and
+        (Test-Path $WebEnv) -and
+        (Test-Path $Env) -and
+        (Test-Path $Revolt) -and
+        (Test-Path $Livekit) -and
+        (Test-Path $StoatJson)
+    )
+
+    if ($ConfigComplete) {
+        Step "Complete Stoat configuration found."
+        Step "Keeping existing secrets and configuration."
     }
     else {
+        Step "Incomplete Stoat configuration detected."
+
+        if (-not (Test-Path $Secrets)) {
+            Step "Missing secrets.env"
+        }
+
+        if (-not (Test-Path $WebEnv)) {
+            Step "Missing .env.web"
+        }
+
+        if (-not (Test-Path $Env)) {
+            Step "Missing .env"
+        }
+
+        if (-not (Test-Path $Revolt)) {
+            Step "Missing Revolt.toml"
+        }
+
+        if (-not (Test-Path $Livekit)) {
+            Step "Missing livekit.yml"
+        }
+
+        if (-not (Test-Path $StoatJson)) {
+            Step "Missing stoat.json"
+        }
+
         Generate-Config `
             $InstallDirectory `
             $Domain `
             $Video
     }
+
+    Validate-StoatConfig $InstallDirectory
 
     Start-Stoat $InstallDirectory
 
