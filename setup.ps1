@@ -1,938 +1,663 @@
+```powershell
 $ErrorActionPreference = "Stop"
 
 function Step($Text) {
-Write-Host "  $Text" -ForegroundColor DarkGray
+    Write-Host "  $Text" -ForegroundColor DarkGray
 }
 
 function Ask($Prompt, $Default = "") {
-if ($Default) {
-$Value = Read-Host "$Prompt [$Default]"
-
-```
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-        return $Default
+    if ($Default) {
+        $Value = Read-Host "$Prompt [$Default]"
+        if ([string]::IsNullOrWhiteSpace($Value)) {
+            return $Default
+        }
+        return $Value
     }
 
-    return $Value.Trim()
-}
-
-return (Read-Host $Prompt).Trim()
-```
-
-}
-
-function Ask-YesNo($Prompt, $Default = $true) {
-$Suffix = if ($Default) { "[Y/n]" } else { "[y/N]" }
-
-```
-while ($true) {
-    $Value = Read-Host "$Prompt $Suffix"
-
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-        return $Default
-    }
-
-    switch ($Value.Trim().ToLower()) {
-        "y"    { return $true }
-        "yes"  { return $true }
-        "n"    { return $false }
-        "no"   { return $false }
-    }
-}
-```
-
-}
-
-function Show-SetupWarning {
-Add-Type -AssemblyName System.Windows.Forms
-
-```
-$Result = [System.Windows.Forms.MessageBox]::Show(
-    "hiii wachine`n`nStoat setup is about to begin.",
-    "Stoat Setup",
-    [System.Windows.Forms.MessageBoxButtons]::OKCancel,
-    [System.Windows.Forms.MessageBoxIcon]::Warning
-)
-
-if ($Result -ne [System.Windows.Forms.DialogResult]::OK) {
-    exit 0
-}
-```
-
-}
-
-function Is-Admin {
-$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
-
-```
-return $Principal.IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator
-)
-```
-
+    return Read-Host $Prompt
 }
 
 function Restart-AsAdmin {
-if (Is-Admin) {
-return
+    $CurrentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $Principal = New-Object Security.Principal.WindowsPrincipal($CurrentIdentity)
+
+    if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Start-Process powershell.exe `
+            -Verb RunAs `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+
+        exit
+    }
 }
 
-```
-Write-Host ""
-Write-Host "Administrator access is required." -ForegroundColor Yellow
-Write-Host "Restarting setup..."
-Write-Host ""
+function Show-SetupWarning {
+    Add-Type -AssemblyName System.Windows.Forms
 
-Start-Process powershell.exe -Verb RunAs -ArgumentList @(
-    "-NoProfile"
-    "-ExecutionPolicy"
-    "Bypass"
-    "-File"
-    "`"$PSCommandPath`""
-)
+    $Result = [System.Windows.Forms.MessageBox]::Show(
+        "hiii wachine`n`nStoat setup is about to begin.",
+        "Stoat Setup",
+        [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+        [System.Windows.Forms.MessageBoxIcon]::Warning
+    )
 
-exit
-```
-
-}
-
-function Refresh-Path {
-$MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-
-```
-$env:Path = "$MachinePath;$UserPath"
-```
-
+    if ($Result -ne [System.Windows.Forms.DialogResult]::OK) {
+        exit
+    }
 }
 
 function Require-Winget {
-if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-throw "winget is not available on this Windows installation."
-}
-}
-
-function Install-Git {
-if (Get-Command git -ErrorAction SilentlyContinue) {
-Step "Git found."
-return
-}
-
-```
-Step "Installing Git..."
-
-winget install `
-    --id Git.Git `
-    --exact `
-    --accept-source-agreements `
-    --accept-package-agreements
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Git installation failed."
-}
-
-Refresh-Path
-
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    throw "Git was installed but is not available yet."
-}
-```
-
-}
-
-function Install-Docker {
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-Step "Installing Docker Desktop..."
-
-```
-    winget install `
-        --id Docker.DockerDesktop `
-        --exact `
-        --accept-source-agreements `
-        --accept-package-agreements
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Docker Desktop installation failed."
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "winget was not found. Install App Installer from Microsoft Store first."
     }
-
-    Refresh-Path
-}
-else {
-    Step "Docker found."
 }
 
-$DockerDesktop = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-
-if (Test-Path $DockerDesktop) {
-    Step "Starting Docker Desktop..."
-    Start-Process $DockerDesktop -ErrorAction SilentlyContinue
-}
-
-Step "Waiting for Docker..."
-
-for ($i = 0; $i -lt 90; $i++) {
-    docker info *> $null
-
-    if ($LASTEXITCODE -eq 0) {
-        Step "Docker is ready."
+function Ensure-Git {
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Step "Git found."
         return
     }
 
-    Start-Sleep -Seconds 2
-}
+    Step "Installing Git..."
+    winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements
 
-throw "Docker Desktop did not become ready."
-```
-
-}
-
-function Install-FirewallRules($Cloudflared) {
-Step "Configuring Windows Firewall..."
-
-```
-$Rules = @(
-    @{
-        Name = "Stoat Cloudflared TCP 7844"
-        Protocol = "TCP"
-        Direction = "Outbound"
-        RemotePort = "7844"
-    },
-    @{
-        Name = "Stoat Cloudflared UDP 7844"
-        Protocol = "UDP"
-        Direction = "Outbound"
-        RemotePort = "7844"
-    },
-    @{
-        Name = "Stoat LiveKit TCP 7881"
-        Protocol = "TCP"
-        Direction = "Inbound"
-        LocalPort = "7881"
-    },
-    @{
-        Name = "Stoat LiveKit UDP 50000-50100"
-        Protocol = "UDP"
-        Direction = "Inbound"
-        LocalPort = "50000-50100"
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        throw "Git installation failed."
     }
-)
 
-foreach ($Rule in $Rules) {
-    $Existing = Get-NetFirewallRule `
-        -DisplayName $Rule.Name `
-        -ErrorAction SilentlyContinue
+    Step "Git ready."
+}
 
-    if ($Existing) {
-        Set-NetFirewallRule `
-            -DisplayName $Rule.Name `
-            -Enabled True `
-            -Direction $Rule.Direction `
-            -Action Allow
+function Ensure-Docker {
+    if (Get-Command docker -ErrorAction SilentlyContinue) {
+        Step "Docker found."
     }
     else {
-        $Arguments = @{
-            DisplayName = $Rule.Name
-            Direction = $Rule.Direction
-            Action = "Allow"
-            Protocol = $Rule.Protocol
-        }
-
-        if ($Rule.RemotePort) {
-            $Arguments.RemotePort = $Rule.RemotePort
-        }
-
-        if ($Rule.LocalPort) {
-            $Arguments.LocalPort = $Rule.LocalPort
-        }
-
-        if ($Rule.Program) {
-            $Arguments.Program = $Rule.Program
-        }
-
-        New-NetFirewallRule @Arguments | Out-Null
-    }
-}
-
-Step "Firewall rules ready."
-```
-
-}
-
-function Download-Cloudflared {
-$Existing = Get-Command cloudflared -ErrorAction SilentlyContinue
-
-```
-if ($Existing) {
-    Step "cloudflared found."
-    return $Existing.Source
-}
-
-$Directory = "C:\Cloudflared"
-$Executable = Join-Path $Directory "cloudflared.exe"
-
-New-Item `
-    -ItemType Directory `
-    -Force `
-    -Path $Directory | Out-Null
-
-Step "Downloading cloudflared..."
-
-Invoke-WebRequest `
-    -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" `
-    -OutFile $Executable
-
-if (-not (Test-Path $Executable)) {
-    throw "cloudflared download failed."
-}
-
-return $Executable
-```
-
-}
-
-function Fix-LineEndings($File) {
-$Bytes = [System.IO.File]::ReadAllBytes($File)
-$Output = [System.Collections.Generic.List[byte]]::new()
-
-```
-for ($i = 0; $i -lt $Bytes.Length; $i++) {
-    if (
-        $Bytes[$i] -eq 13 -and
-        ($i + 1) -lt $Bytes.Length -and
-        $Bytes[$i + 1] -eq 10
-    ) {
-        continue
+        Step "Installing Docker Desktop..."
+        winget install --id Docker.DockerDesktop -e --source winget --accept-source-agreements --accept-package-agreements
     }
 
-    $Output.Add($Bytes[$i])
-}
+    $DockerDesktop = "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
 
-[System.IO.File]::WriteAllBytes(
-    $File,
-    $Output.ToArray()
-)
-```
-
-}
-
-function Clone-Stoat($Directory) {
-$Repo = "https://github.com/stoatchat/self-hosted.git"
-
-```
-if (Test-Path (Join-Path $Directory ".git")) {
-    Step "Existing Stoat repository found."
-
-    Set-Location $Directory
-
-    Step "Updating repository..."
-
-    git pull
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Git could not update the Stoat repository."
+    if (Test-Path $DockerDesktop) {
+        Step "Starting Docker Desktop..."
+        Start-Process $DockerDesktop
     }
 
-    return
+    Step "Waiting for Docker..."
+
+    $Ready = $false
+
+    for ($i = 0; $i -lt 90; $i++) {
+        Start-Sleep -Seconds 2
+
+        try {
+            docker info *> $null
+
+            if ($LASTEXITCODE -eq 0) {
+                $Ready = $true
+                break
+            }
+        }
+        catch {
+        }
+    }
+
+    if (-not $Ready) {
+        throw "Docker did not become ready."
+    }
+
+    Step "Docker is ready."
 }
 
-if (Test-Path $Directory) {
-    throw "$Directory already exists and is not a Stoat repository."
+function Ensure-Cloudflared {
+    $Directory = "C:\Cloudflared"
+    $Binary = Join-Path $Directory "cloudflared.exe"
+
+    New-Item -ItemType Directory -Force -Path $Directory | Out-Null
+
+    if (Test-Path $Binary) {
+        Step "cloudflared found."
+        return $Binary
+    }
+
+    Step "Downloading cloudflared..."
+
+    $Url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+
+    Invoke-WebRequest `
+        -Uri $Url `
+        -OutFile $Binary
+
+    if (-not (Test-Path $Binary)) {
+        throw "cloudflared download failed."
+    }
+
+    Step "cloudflared ready."
+
+    return $Binary
 }
 
-Step "Downloading Stoat..."
+function Configure-Firewall {
+    Step "Configuring Windows Firewall..."
 
-git clone $Repo $Directory
+    $Rules = @(
+        @{
+            Name = "Stoat Cloudflare TCP 7844"
+            Protocol = "TCP"
+            Port = "7844"
+        },
+        @{
+            Name = "Stoat Cloudflare UDP 7844"
+            Protocol = "UDP"
+            Port = "7844"
+        },
+        @{
+            Name = "Stoat LiveKit TCP 7881"
+            Protocol = "TCP"
+            Port = "7881"
+        },
+        @{
+            Name = "Stoat LiveKit UDP 50000-50100"
+            Protocol = "UDP"
+            Port = "50000-50100"
+        }
+    )
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Stoat download failed."
+    foreach ($Rule in $Rules) {
+        if (-not (Get-NetFirewallRule -DisplayName $Rule.Name -ErrorAction SilentlyContinue)) {
+            New-NetFirewallRule `
+                -DisplayName $Rule.Name `
+                -Direction Inbound `
+                -Action Allow `
+                -Protocol $Rule.Protocol `
+                -LocalPort $Rule.Port | Out-Null
+        }
+    }
+
+    Step "Firewall rules ready."
 }
 
-Set-Location $Directory
-```
+function Download-Stoat {
+    param(
+        [string]$Directory
+    )
 
+    $Repo = "https://github.com/stoatchat/self-hosted.git"
+
+    if (Test-Path (Join-Path $Directory ".git")) {
+        Step "Existing Stoat repository found."
+
+        Push-Location $Directory
+
+        try {
+            git fetch --all
+            git reset --hard origin/main
+        }
+        finally {
+            Pop-Location
+        }
+
+        return
+    }
+
+    if (Test-Path $Directory) {
+        $Items = Get-ChildItem -LiteralPath $Directory -Force
+
+        if ($Items.Count -gt 0) {
+            throw "Install directory exists and is not an existing Stoat repository: $Directory"
+        }
+    }
+    else {
+        New-Item -ItemType Directory -Force -Path $Directory | Out-Null
+    }
+
+    Step "Downloading Stoat..."
+
+    git clone $Repo $Directory
+}
+
+function Fix-LineEndings {
+    param(
+        [string]$File
+    )
+
+    $Bytes = [System.IO.File]::ReadAllBytes($File)
+    $Output = [System.Collections.Generic.List[byte]]::new()
+
+    for ($i = 0; $i -lt $Bytes.Length; $i++) {
+        if (
+            $Bytes[$i] -eq 13 -and
+            ($i + 1) -lt $Bytes.Length -and
+            $Bytes[$i + 1] -eq 10
+        ) {
+            continue
+        }
+
+        $Output.Add($Bytes[$i])
+    }
+
+    [System.IO.File]::WriteAllBytes(
+        $File,
+        $Output.ToArray()
+    )
 }
 
 function Get-GitBash {
-$Paths = @(
-"${env:ProgramFiles}\Git\bin\bash.exe",
-"${env:ProgramFiles(x86)}\Git\bin\bash.exe",
-"$env:LOCALAPPDATA\Programs\Git\bin\bash.exe"
-)
+    $Paths = @(
+        "${env:ProgramFiles}\Git\bin\bash.exe",
+        "${env:ProgramFiles(x86)}\Git\bin\bash.exe",
+        "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe"
+    )
 
-```
-foreach ($Path in $Paths) {
-    if (Test-Path $Path) {
-        return $Path
+    foreach ($Path in $Paths) {
+        if (Test-Path $Path) {
+            return $Path
+        }
     }
+
+    $Git = Get-Command git -ErrorAction SilentlyContinue
+
+    if ($Git) {
+        $GitDirectory = Split-Path $Git.Source -Parent
+        $Candidate = Join-Path $GitDirectory "bash.exe"
+
+        if (Test-Path $Candidate) {
+            return $Candidate
+        }
+    }
+
+    throw "Git Bash was not found."
 }
 
-$Git = Get-Command git -ErrorAction SilentlyContinue
+function Generate-Config {
+    param(
+        [string]$Directory,
+        [string]$Domain,
+        [bool]$EnableVideo
+    )
 
-if ($Git) {
-    $GitDirectory = Split-Path $Git.Source -Parent
+    Step "Generating Stoat configuration..."
 
-    $Bash = Join-Path $GitDirectory "bash.exe"
+    $Generator = Join-Path $Directory "generate_config.sh"
 
-    if (Test-Path $Bash) {
-        return $Bash
+    if (-not (Test-Path $Generator)) {
+        throw "generate_config.sh was not found."
     }
 
-    $Bash = Join-Path `
-        (Split-Path $GitDirectory -Parent) `
-        "bin\bash.exe"
+    Fix-LineEndings $Generator
 
-    if (Test-Path $Bash) {
-        return $Bash
+    $GitBash = Get-GitBash
+
+    if ($EnableVideo) {
+        $VideoAnswer = "y"
     }
+    else {
+        $VideoAnswer = "n"
+    }
+
+    Push-Location $Directory
+
+    try {
+        $Input = "n`n$VideoAnswer`n"
+
+        $Input | & $GitBash -lc "./generate_config.sh '$Domain'"
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Stoat configuration generation failed."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    Step "Configuration generated."
 }
 
-throw "Git Bash was not found."
-```
+function Validate-StoatConfig {
+    param(
+        [string]$Directory
+    )
 
+    $Paths = @(
+        (Join-Path $Directory "secrets.env"),
+        (Join-Path $Directory ".env.web"),
+        (Join-Path $Directory ".env"),
+        (Join-Path $Directory "Revolt.toml"),
+        (Join-Path $Directory "livekit.yml"),
+        (Join-Path $Directory "stoat.json")
+    )
+
+    foreach ($Path in $Paths) {
+        if (-not (Test-Path $Path)) {
+            throw "Missing required Stoat configuration file: $Path"
+        }
+    }
+
+    Step "Stoat configuration is complete."
 }
 
 function Test-LiveKitPorts {
-Step "Checking LiveKit network ports..."
+    Step "Checking LiveKit ports..."
 
-```
-$TcpPort = 7881
-$UdpStart = 50000
-$UdpEnd = 50100
-
-$TcpConflict = Get-NetTCPConnection `
-    -LocalPort $TcpPort `
-    -ErrorAction SilentlyContinue
-
-if ($TcpConflict) {
-    $Processes = @()
-
-    foreach ($Connection in $TcpConflict) {
-        $Pid = $Connection.OwningProcess
-
-        if ($Pid -and $Pid -ne 0) {
-            $Process = Get-Process `
-                -Id $Pid `
-                -ErrorAction SilentlyContinue
-
-            if ($Process) {
-                $Processes += "$($Process.ProcessName) (PID $Pid)"
-            }
-        }
-    }
-
-    $ProcessText = ($Processes | Select-Object -Unique) -join ", "
-
-    if ($ProcessText) {
-        throw "LiveKit TCP port 7881 is already in use by $ProcessText."
-    }
-
-    throw "LiveKit TCP port 7881 is already in use."
-}
-
-$UdpConflicts = @()
-
-for ($Port = $UdpStart; $Port -le $UdpEnd; $Port++) {
-    $Endpoint = Get-NetUDPEndpoint `
-        -LocalPort $Port `
+    $Tcp = Get-NetTCPConnection `
+        -LocalPort 7881 `
         -ErrorAction SilentlyContinue
 
-    if ($Endpoint) {
-        foreach ($Entry in $Endpoint) {
-            $Pid = $Entry.OwningProcess
-
-            if ($Pid -and $Pid -ne 0) {
-                $Process = Get-Process `
-                    -Id $Pid `
-                    -ErrorAction SilentlyContinue
-
-                if ($Process) {
-                    $UdpConflicts += @{
-                        Port = $Port
-                        Process = $Process.ProcessName
-                        Pid = $Pid
-                    }
+    if ($Tcp) {
+        $Owners = $Tcp |
+            Select-Object -ExpandProperty OwningProcess -Unique |
+            ForEach-Object {
+                try {
+                    Get-Process -Id $_ -ErrorAction Stop |
+                        Select-Object -ExpandProperty ProcessName
                 }
-                else {
-                    $UdpConflicts += @{
-                        Port = $Port
-                        Process = "PID $Pid"
-                        Pid = $Pid
-                    }
+                catch {
+                    "PID $_"
                 }
             }
-        }
+
+        throw "TCP port 7881 is already in use by: $($Owners -join ', ')"
     }
-}
 
-if ($UdpConflicts.Count -gt 0) {
-    $UniqueConflicts = $UdpConflicts |
-        Sort-Object Port, Pid |
-        Group-Object Pid |
-        ForEach-Object {
-            $Ports = ($_.Group.Port | Sort-Object -Unique) -join ", "
-            $Process = $_.Group[0].Process
-            "$Process (PID $($_.Name), ports $Ports)"
-        }
+    $Udp = Get-NetUDPEndpoint `
+        -LocalPort 50000 `
+        -ErrorAction SilentlyContinue
 
-    $ConflictText = $UniqueConflicts -join "; "
+    if ($Udp) {
+        $Owners = $Udp |
+            Select-Object -ExpandProperty OwningProcess -Unique |
+            ForEach-Object {
+                try {
+                    Get-Process -Id $_ -ErrorAction Stop |
+                        Select-Object -ExpandProperty ProcessName
+                }
+                catch {
+                    "PID $_"
+                }
+            }
 
-    throw "LiveKit UDP ports 50000-50100 are already in use: $ConflictText"
-}
+        throw "UDP port 50000 is already in use by: $($Owners -join ', ')"
+    }
 
-$Excluded = netsh interface ipv4 show excludedportrange protocol=udp 2>$null
+    $Excluded = netsh interface ipv4 show excludedportrange protocol=udp
 
-if ($Excluded) {
     foreach ($Line in $Excluded) {
-        if ($Line -match '^\s*(\d+)\s+(\d+)\s+') {
+        if ($Line -match "^\s*(\d+)\s+(\d+)\s*$") {
             $Start = [int]$Matches[1]
             $End = [int]$Matches[2]
 
-            if (
-                $Start -le $UdpEnd -and
-                $End -ge $UdpStart
-            ) {
-                throw "Windows has reserved UDP port range $Start-$End, which overlaps Stoat's required LiveKit range 50000-50100."
+            if (($Start -le 50100) -and ($End -ge 50000)) {
+                throw "Windows has reserved UDP port range $Start-$End, which overlaps LiveKit ports 50000-50100."
             }
         }
     }
+
+    Step "LiveKit ports are available."
 }
 
-Step "LiveKit ports are available."
-```
+function Start-Stoat {
+    param(
+        [string]$Directory
+    )
 
+    Test-LiveKitPorts
+
+    Push-Location $Directory
+
+    try {
+        Step "Pulling Stoat containers..."
+
+        docker compose pull
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Docker image pull failed."
+        }
+
+        Step "Starting Stoat..."
+
+        docker compose up -d
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Stoat failed to start."
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    Step "Stoat containers are running."
 }
 
-function Generate-Config($Directory, $Domain, $Video) {
-$Generator = Join-Path $Directory "generate_config.sh"
-$Revolt = Join-Path $Directory "Revolt.toml"
+function Get-TunnelId {
+    param(
+        [string]$Cloudflared
+    )
 
-```
-if (-not (Test-Path $Generator)) {
-    throw "generate_config.sh was not found."
-}
+    $Existing = & $Cloudflared tunnel list --output json 2>$null
 
-Fix-LineEndings $Generator
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($Existing)) {
+        return $null
+    }
 
-$GitBash = Get-GitBash
+    try {
+        $Tunnels = $Existing | ConvertFrom-Json
 
-$VideoAnswer = if ($Video) { "y" } else { "n" }
+        if ($Tunnels -is [array]) {
+            return $Tunnels[0].id
+        }
 
-if (Test-Path $Revolt) {
-    Step "Existing Stoat configuration detected."
-    Step "Regenerating configuration with existing secrets."
-
-    $Arguments = "--overwrite `"$Domain`""
-}
-else {
-    Step "Generating Stoat configuration."
-
-    $Arguments = "`"$Domain`""
-}
-
-Step "Running Stoat configuration generator..."
-
-$Input = "n`n$VideoAnswer`n"
-
-$Input | & $GitBash -lc "cd '$Directory' && ./generate_config.sh $Arguments"
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Stoat configuration generation failed."
-}
-
-$RequiredFiles = @(
-    "secrets.env",
-    ".env",
-    ".env.web",
-    "Revolt.toml",
-    "livekit.yml",
-    "stoat.json"
-)
-
-foreach ($File in $RequiredFiles) {
-    $Path = Join-Path $Directory $File
-
-    if (-not (Test-Path $Path)) {
-        throw "Stoat configuration is incomplete. Missing: $File"
+        return $Tunnels.id
+    }
+    catch {
+        return $null
     }
 }
 
-Step "Stoat configuration generated successfully."
-```
+function Setup-Cloudflare {
+    param(
+        [string]$Cloudflared,
+        [string]$Domain,
+        [string]$Directory
+    )
 
-}
+    Step "Checking Cloudflare authentication..."
 
-function Validate-StoatConfig($Directory) {
-Step "Validating Stoat configuration..."
-
-```
-$RequiredFiles = @(
-    "secrets.env",
-    ".env",
-    ".env.web",
-    "Revolt.toml",
-    "livekit.yml",
-    "stoat.json"
-)
-
-foreach ($File in $RequiredFiles) {
-    $Path = Join-Path $Directory $File
-
-    if (-not (Test-Path $Path)) {
-        throw "Required Stoat configuration file is missing: $File"
-    }
-}
-
-Set-Location $Directory
-
-docker compose config *> $null
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Docker Compose configuration validation failed."
-}
-
-Step "Stoat configuration is valid."
-```
-
-}
-
-function Start-Stoat($Directory) {
-Set-Location $Directory
-
-```
-Test-LiveKitPorts
-
-Step "Downloading Stoat container images..."
-
-docker compose pull
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Docker could not download the Stoat images."
-}
-
-Step "Starting Stoat..."
-
-docker compose up -d
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Stoat failed to start."
-}
-
-Step "Checking Stoat containers..."
-
-docker compose ps
-```
-
-}
-
-function Get-TunnelId($Cloudflared, $TunnelName) {
-$Json = & $Cloudflared tunnel list --output json 2>$null
-
-```
-if (-not $Json) {
-    return $null
-}
-
-try {
-    $Parsed = $Json | ConvertFrom-Json
-
-    $Tunnel = $Parsed |
-        Where-Object { $_.name -eq $TunnelName } |
-        Select-Object -First 1
-
-    if ($Tunnel) {
-        return $Tunnel.id
-    }
-}
-catch {
-    return $null
-}
-
-return $null
-```
-
-}
-
-function Create-CloudflareConfig(
-$Directory,
-$Domain,
-$TunnelId
-) {
-$CloudflareDirectory = Join-Path $Directory "cloudflare"
-
-```
-New-Item `
-    -ItemType Directory `
-    -Force `
-    -Path $CloudflareDirectory | Out-Null
-
-$Credentials = Join-Path `
-    $env:USERPROFILE `
-    ".cloudflared\$TunnelId.json"
-
-if (-not (Test-Path $Credentials)) {
-    throw "Cloudflare tunnel credentials were not found."
-}
-
-$Config = Join-Path `
-    $CloudflareDirectory `
-    "config.yml"
-
-@"
-```
-
-tunnel: $TunnelId
-credentials-file: $Credentials
-
-ingress:
-
-* hostname: $Domain
-  service: https://localhost:443
-  originRequest:
-  originServerName: $Domain
-  noTLSVerify: true
-
-* service: http_status:404
-  "@ | Set-Content `    -Path $Config`
-  -Encoding UTF8
-
-  return $Config
-  }
-
-function Setup-Cloudflare(
-$Cloudflared,
-$Directory,
-$Domain
-) {
-Write-Host ""
-Write-Host "Cloudflare Tunnel" -ForegroundColor Cyan
-Write-Host ""
-
-```
-Step "Cloudflare login is required once."
-Step "A browser window will open."
-
-Write-Host ""
-Read-Host "Press Enter to continue"
-
-& $Cloudflared tunnel login
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Cloudflare login failed."
-}
-
-$TunnelName = "stoat-$($Domain -replace '[^a-zA-Z0-9-]', '-')"
-
-$TunnelId = Get-TunnelId `
-    $Cloudflared `
-    $TunnelName
-
-if ($TunnelId) {
-    Step "Existing Cloudflare tunnel found: $TunnelName"
-}
-else {
-    Step "Creating Cloudflare tunnel: $TunnelName"
-
-    & $Cloudflared tunnel create $TunnelName
+    $Auth = & $Cloudflared tunnel list --output json 2>$null
 
     if ($LASTEXITCODE -ne 0) {
-        throw "Cloudflare tunnel creation failed."
+        Write-Host ""
+        Write-Host "Cloudflare authentication is required." -ForegroundColor Yellow
+        Write-Host ""
+
+        & $Cloudflared tunnel login
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cloudflare authentication failed."
+        }
     }
 
-    $TunnelId = Get-TunnelId `
-        $Cloudflared `
-        $TunnelName
+    $TunnelName = "stoat-" + ($Domain -replace "[^a-zA-Z0-9-]", "-")
+
+    Step "Checking Cloudflare tunnel..."
+
+    $TunnelId = $null
+    $TunnelList = & $Cloudflared tunnel list --output json 2>$null
+
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($TunnelList)) {
+        try {
+            $Tunnels = $TunnelList | ConvertFrom-Json
+
+            foreach ($Tunnel in $Tunnels) {
+                if ($Tunnel.name -eq $TunnelName) {
+                    $TunnelId = $Tunnel.id
+                    break
+                }
+            }
+        }
+        catch {
+        }
+    }
 
     if (-not $TunnelId) {
-        throw "Tunnel was created but its ID could not be located."
+        Step "Creating Cloudflare tunnel..."
+
+        & $Cloudflared tunnel create $TunnelName
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cloudflare tunnel creation failed."
+        }
+
+        $TunnelList = & $Cloudflared tunnel list --output json 2>$null
+
+        try {
+            $Tunnels = $TunnelList | ConvertFrom-Json
+
+            foreach ($Tunnel in $Tunnels) {
+                if ($Tunnel.name -eq $TunnelName) {
+                    $TunnelId = $Tunnel.id
+                    break
+                }
+            }
+        }
+        catch {
+        }
     }
-}
 
-$Config = Create-CloudflareConfig `
-    $Directory `
-    $Domain `
-    $TunnelId
+    if (-not $TunnelId) {
+        throw "Could not determine Cloudflare tunnel ID."
+    }
 
-Step "Creating DNS route..."
+    $Credentials = Join-Path "$env:USERPROFILE\.cloudflared" "$TunnelId.json"
+    $Config = Join-Path $env:USERPROFILE ".cloudflared\config.yml"
 
-& $Cloudflared tunnel route dns `
-    $TunnelName `
-    $Domain
+    if (-not (Test-Path $Credentials)) {
+        throw "Cloudflare tunnel credentials were not found: $Credentials"
+    }
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Cloudflare DNS route creation failed."
-}
+    $ConfigLines = @(
+        "tunnel: $TunnelId"
+        "credentials-file: $Credentials"
+        ""
+        "ingress:"
+        "  - hostname: $Domain"
+        "    service: https://localhost:443"
+        "    originRequest:"
+        "      originServerName: $Domain"
+        "      noTLSVerify: true"
+        ""
+        "  - service: http_status:404"
+    )
 
-Step "Validating Cloudflare configuration..."
+    $ConfigLines | Set-Content -Path $Config -Encoding UTF8
 
-& $Cloudflared tunnel ingress validate `
-    --config $Config
+    Step "Configuring Cloudflare DNS..."
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Cloudflare tunnel configuration is invalid."
-}
+    & $Cloudflared tunnel route dns $TunnelName $Domain
 
-Step "Cloudflare tunnel configured."
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cloudflare DNS configuration failed."
+    }
 
-return @{
-    Name = $TunnelName
-    Id = $TunnelId
-    Config = $Config
-}
-```
+    Step "Starting Cloudflare tunnel..."
 
+    Get-Process cloudflared -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+
+    Start-Process `
+        -FilePath $Cloudflared `
+        -ArgumentList "tunnel --config `"$Config`" run $TunnelName" `
+        -WindowStyle Hidden
+
+    Start-Sleep -Seconds 3
+
+    Step "Cloudflare tunnel started."
+
+    return $TunnelName
 }
 
 try {
-Clear-Host
+    Clear-Host
 
-```
-Show-SetupWarning
+    Write-Host ""
+    Write-Host "Stoat Setup" -ForegroundColor Cyan
+    Write-Host "hiii wachine" -ForegroundColor DarkGray
+    Write-Host ""
 
-Write-Host ""
-Write-Host "Stoat Setup" -ForegroundColor Cyan
-Write-Host "hiii wachine" -ForegroundColor DarkGray
-Write-Host ""
+    Show-SetupWarning
+    Restart-AsAdmin
+    Require-Winget
 
-Restart-AsAdmin
-Require-Winget
+    $Domain = Ask "Stoat domain" "stoat.webuildsites.org"
+    $InstallDirectory = Ask "Install directory" "C:\Stoat"
 
-$Domain = Ask "Stoat domain"
+    $VideoInput = Ask "Enable voice, camera and screen sharing?" "Y"
+    $EnableVideo = $VideoInput -match "^(y|yes)$"
 
-if ([string]::IsNullOrWhiteSpace($Domain)) {
-    throw "A domain is required."
-}
+    Write-Host ""
+    Write-Host "Preparing system..." -ForegroundColor Cyan
+    Write-Host ""
 
-$Domain = $Domain.ToLower()
+    Ensure-Git
+    Ensure-Docker
 
-if ($Domain -notmatch '^[a-z0-9][a-z0-9.-]*[a-z0-9]$') {
-    throw "Invalid hostname."
-}
+    $Cloudflared = Ensure-Cloudflared
 
-$InstallDirectory = Ask `
-    "Install directory" `
-    "C:\Stoat"
+    Configure-Firewall
 
-$Video = Ask-YesNo `
-    "Enable voice, camera and screen sharing?" `
-    $true
+    Write-Host ""
+    Write-Host "Stoat" -ForegroundColor Cyan
+    Write-Host ""
 
-Write-Host ""
-Write-Host "Preparing system..." -ForegroundColor Cyan
-Write-Host ""
+    Download-Stoat $InstallDirectory
 
-Install-Git
-Install-Docker
+    $Secrets = Join-Path $InstallDirectory "secrets.env"
+    $WebEnv = Join-Path $InstallDirectory ".env.web"
+    $Env = Join-Path $InstallDirectory ".env"
+    $Revolt = Join-Path $InstallDirectory "Revolt.toml"
+    $Livekit = Join-Path $InstallDirectory "livekit.yml"
+    $StoatJson = Join-Path $InstallDirectory "stoat.json"
 
-$Cloudflared = Download-Cloudflared
+    $ConfigComplete = (
+        (Test-Path $Secrets) -and
+        (Test-Path $WebEnv) -and
+        (Test-Path $Env) -and
+        (Test-Path $Revolt) -and
+        (Test-Path $Livekit) -and
+        (Test-Path $StoatJson)
+    )
 
-Install-FirewallRules $Cloudflared
-
-Write-Host ""
-Write-Host "Stoat" -ForegroundColor Cyan
-Write-Host ""
-
-Clone-Stoat $InstallDirectory
-
-$Secrets = Join-Path `
-    $InstallDirectory `
-    "secrets.env"
-
-$WebEnv = Join-Path `
-    $InstallDirectory `
-    ".env.web"
-
-$Env = Join-Path `
-    $InstallDirectory `
-    ".env"
-
-$Revolt = Join-Path `
-    $InstallDirectory `
-    "Revolt.toml"
-
-$Livekit = Join-Path `
-    $InstallDirectory `
-    "livekit.yml"
-
-$StoatJson = Join-Path `
-    $InstallDirectory `
-    "stoat.json"
-
-$ConfigComplete = (
-    (Test-Path $Secrets) -and
-    (Test-Path $WebEnv) -and
-    (Test-Path $Env) -and
-    (Test-Path $Revolt) -and
-    (Test-Path $Livekit) -and
-    (Test-Path $StoatJson)
-)
-
-if ($ConfigComplete) {
-    Step "Complete Stoat configuration found."
-    Step "Keeping existing secrets and configuration."
-}
-else {
-    Step "Incomplete Stoat configuration detected."
-
-    if (-not (Test-Path $Secrets)) {
-        Step "Missing secrets.env"
+    if (-not $ConfigComplete) {
+        Generate-Config `
+            -Directory $InstallDirectory `
+            -Domain $Domain `
+            -EnableVideo $EnableVideo
+    }
+    else {
+        Step "Existing Stoat configuration found."
     }
 
-    if (-not (Test-Path $WebEnv)) {
-        Step "Missing .env.web"
-    }
+    Validate-StoatConfig $InstallDirectory
 
-    if (-not (Test-Path $Env)) {
-        Step "Missing .env"
-    }
+    Start-Stoat $InstallDirectory
 
-    if (-not (Test-Path $Revolt)) {
-        Step "Missing Revolt.toml"
-    }
+    $TunnelName = Setup-Cloudflare `
+        -Cloudflared $Cloudflared `
+        -Domain $Domain `
+        -Directory $InstallDirectory
 
-    if (-not (Test-Path $Livekit)) {
-        Step "Missing livekit.yml"
-    }
-
-    if (-not (Test-Path $StoatJson)) {
-        Step "Missing stoat.json"
-    }
-
-    Generate-Config `
-        $InstallDirectory `
-        $Domain `
-        $Video
-}
-
-Validate-StoatConfig $InstallDirectory
-
-Start-Stoat $InstallDirectory
-
-$Cloudflare = Setup-Cloudflare `
-    $Cloudflared `
-    $InstallDirectory `
-    $Domain
-
-Write-Host ""
-Write-Host "Stoat is running." -ForegroundColor Green
-Write-Host ""
-Write-Host "  URL: https://$Domain"
-Write-Host "  Location: $InstallDirectory"
-Write-Host ""
-Write-Host "Startup script:" -ForegroundColor Cyan
-Write-Host "  $InstallDirectory\startup.ps1"
-Write-Host ""
-Write-Host "Keep this PowerShell window open while the tunnel is running."
-Write-Host ""
-```
-
+    Write-Host ""
+    Write-Host "Stoat setup complete." -ForegroundColor Green
+    Write-Host ""
+    Write-Host "URL: https://$Domain" -ForegroundColor Cyan
+    Write-Host "Install: $InstallDirectory" -ForegroundColor DarkGray
+    Write-Host "Tunnel: $TunnelName" -ForegroundColor DarkGray
+    Write-Host ""
 }
 catch {
-Write-Host ""
-Write-Host "Setup failed:" -ForegroundColor Red
-Write-Host ""
-Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
-Write-Host ""
-Read-Host "Press Enter to close"
-exit 1
+    Write-Host ""
+    Write-Host "Setup failed." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host ""
+    exit 1
 }
+```
